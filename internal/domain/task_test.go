@@ -108,18 +108,18 @@ func pathTo(target TaskState) ([]TaskState, bool) {
 }
 
 // newTaskAt builds a task and walks it to target through the public API.
-func newTaskAt(t *testing.T, target TaskState) *Task {
+func newTaskAt(t *testing.T, target TaskState) *taskImpl {
 	t.Helper()
 	path, ok := pathTo(target)
 	if !ok {
 		t.Fatalf("test bug: no setup path to %q", target)
 	}
-	task, err := NewTask("task-1")
+	task, err := newTaskImpl("task-1")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
 	for _, step := range path {
-		if err := task.Transition(step); err != nil {
+		if err := task.transition(step); err != nil {
 			t.Fatalf("setup for %s: Transition(%s): %v", target, step, err)
 		}
 	}
@@ -163,7 +163,7 @@ func TestSpecTablesAreComplete(t *testing.T) {
 }
 
 func TestNewTaskStartsInDraft(t *testing.T) {
-	task, err := NewTask("task-1")
+	task, err := newTaskImpl("task-1")
 	if err != nil {
 		t.Fatalf("NewTask returned error: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestApprovedTransitionsSucceed(t *testing.T) {
 		for _, to := range e.to {
 			t.Run(fmt.Sprintf("%s_to_%s", e.from, to), func(t *testing.T) {
 				task := newTaskAt(t, e.from)
-				if err := task.Transition(to); err != nil {
+				if err := task.transition(to); err != nil {
 					t.Fatalf("Transition(%s) from %s: %v", to, e.from, err)
 				}
 				if got := task.State(); got != to {
@@ -211,8 +211,8 @@ func TestTransitionMatrix(t *testing.T) {
 		for _, to := range specStates {
 			t.Run(fmt.Sprintf("%s_to_%s", from, to), func(t *testing.T) {
 				task := newTaskAt(t, from)
-				before := *task
-				err := task.Transition(to)
+				before := snapOf(task)
+				err := task.transition(to)
 
 				if specAllows(from, to) {
 					if err != nil {
@@ -227,8 +227,8 @@ func TestTransitionMatrix(t *testing.T) {
 				if !errors.Is(err, ErrInvalidTransition) {
 					t.Fatalf("error = %v, want ErrInvalidTransition", err)
 				}
-				if *task != before {
-					t.Fatalf("rejected transition mutated the task: before %+v, after %+v", before, *task)
+				if snapOf(task) != before {
+					t.Fatalf("rejected transition mutated the task: before %+v, after %+v", before, snapOf(task))
 				}
 			})
 		}
@@ -240,22 +240,22 @@ func TestInvalidTargetStatesRejected(t *testing.T) {
 	for _, from := range specStates {
 		for _, to := range bad {
 			task := newTaskAt(t, from)
-			before := *task
-			err := task.Transition(to)
+			before := snapOf(task)
+			err := task.transition(to)
 			if !errors.Is(err, ErrInvalidState) {
 				t.Errorf("%s -> %q: error = %v, want ErrInvalidState", from, to, err)
 			}
-			if *task != before {
-				t.Errorf("%s -> %q mutated the task: before %+v, after %+v", from, to, before, *task)
+			if snapOf(task) != before {
+				t.Errorf("%s -> %q mutated the task: before %+v, after %+v", from, to, before, snapOf(task))
 			}
 		}
 	}
 }
 
 func TestZeroValueTaskFailsClosed(t *testing.T) {
-	for _, task := range []*Task{new(Task), {}} {
+	for _, task := range []*taskImpl{new(taskImpl), {}} {
 		for _, to := range specStates {
-			err := task.Transition(to)
+			err := task.transition(to)
 			if !errors.Is(err, ErrInvalidState) {
 				t.Errorf("zero Task -> %s: error = %v, want ErrInvalidState", to, err)
 			}
@@ -272,7 +272,7 @@ func TestZeroValueTaskFailsClosed(t *testing.T) {
 func TestMergedIsTerminal(t *testing.T) {
 	for _, to := range specStates {
 		task := newTaskAt(t, StateMerged)
-		err := task.Transition(to)
+		err := task.transition(to)
 		if !errors.Is(err, ErrTerminalState) || !errors.Is(err, ErrInvalidTransition) {
 			t.Errorf("MERGED -> %s: error = %v, want ErrTerminalState and ErrInvalidTransition", to, err)
 		}
@@ -282,7 +282,7 @@ func TestMergedIsTerminal(t *testing.T) {
 	}
 
 	task := newTaskAt(t, StateMerged)
-	if err := task.Transition("NOT_A_STATE"); err == nil {
+	if err := task.transition("NOT_A_STATE"); err == nil {
 		t.Error("MERGED -> invalid state succeeded")
 	}
 	if got := task.State(); got != StateMerged {
@@ -291,7 +291,7 @@ func TestMergedIsTerminal(t *testing.T) {
 }
 
 func TestFullLifecycleReachesMerged(t *testing.T) {
-	task, err := NewTask("task-1")
+	task, err := newTaskImpl("task-1")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestFullLifecycleReachesMerged(t *testing.T) {
 		StateMerged,
 	}
 	for _, s := range steps {
-		if err := task.Transition(s); err != nil {
+		if err := task.transition(s); err != nil {
 			t.Fatalf("Transition(%s): %v", s, err)
 		}
 	}
@@ -345,7 +345,7 @@ func TestOnlyHumanApprovalCanMerge(t *testing.T) {
 			continue
 		}
 		task := newTaskAt(t, from)
-		if err := task.Transition(StateMerged); err == nil {
+		if err := task.transition(StateMerged); err == nil {
 			t.Errorf("%s -> MERGED succeeded; only HUMAN_APPROVAL may precede MERGED", from)
 		}
 		if got := task.State(); got != from {
@@ -367,7 +367,7 @@ func TestFailureAndViolationPathsAreDistinct(t *testing.T) {
 	}
 	for _, c := range allowed {
 		task := newTaskAt(t, c.from)
-		if err := task.Transition(c.to); err != nil {
+		if err := task.transition(c.to); err != nil {
 			t.Errorf("%s -> %s should be allowed: %v", c.from, c.to, err)
 		}
 	}
@@ -382,7 +382,7 @@ func TestFailureAndViolationPathsAreDistinct(t *testing.T) {
 	}
 	for _, c := range denied {
 		task := newTaskAt(t, c.from)
-		if err := task.Transition(c.to); !errors.Is(err, ErrInvalidTransition) {
+		if err := task.transition(c.to); !errors.Is(err, ErrInvalidTransition) {
 			t.Errorf("%s -> %s error = %v, want ErrInvalidTransition", c.from, c.to, err)
 		}
 		if got := task.State(); got != c.from {
@@ -395,12 +395,12 @@ func TestRepeatedCorrectionCyclesThenReview(t *testing.T) {
 	task := newTaskAt(t, StateVerifying)
 	for i := 0; i < 3; i++ {
 		for _, s := range []TaskState{StateCorrecting, StateVerifying} {
-			if err := task.Transition(s); err != nil {
+			if err := task.transition(s); err != nil {
 				t.Fatalf("cycle %d: Transition(%s): %v", i, s, err)
 			}
 		}
 	}
-	if err := task.Transition(StateReviewing); err != nil {
+	if err := task.transition(StateReviewing); err != nil {
 		t.Fatalf("Transition(REVIEWING) after corrections: %v", err)
 	}
 }
@@ -408,7 +408,7 @@ func TestRepeatedCorrectionCyclesThenReview(t *testing.T) {
 func TestHaltedOnlyExitsToHumanReview(t *testing.T) {
 	for _, to := range specStates {
 		task := newTaskAt(t, StateHalted)
-		err := task.Transition(to)
+		err := task.transition(to)
 		if to == StateHumanReview {
 			if err != nil {
 				t.Errorf("HALTED -> HUMAN_REVIEW should be allowed: %v", err)
